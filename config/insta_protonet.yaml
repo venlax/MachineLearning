@@ -4,10 +4,17 @@ includes:
   - headers/misc.yaml
   - headers/model.yaml
   - headers/optimizer.yaml
-  - backbones/Conv4.yaml
+  - backbones/resnet12.yaml
 
 classifier:
   name: INSTA_ProtoNet
   kwargs:
     n_way: 5
     n_support: 1
+    args:
+      way: 5
+      shot: 1
+      balance_1 : 0.5
+      balance_2 : 0.5
+      temperature : 1
+      testing : False

@@ -5,9 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import time
 
-from meta_model import MetaModel
+from .meta_model import MetaModel
 from core.utils import accuracy
-from backbone.fcanet import MultiSpectralAttentionLayer
+from ..backbone.fcanet import MultiSpectralAttentionLayer
 from ..backbone.resnet_12 import resnet12
 
 class INSTA(nn.Module):
@@ -133,7 +133,7 @@ class INSTA_ProtoNet(MetaModel):
         self.loss_func = nn.CrossEntropyLoss()
         self.INSTA = INSTA(640, 5, 0.2, 3, args=args)
         self.classifier = nn.Sequential(
-            nn.Linear(640, self.args.way)
+            nn.Linear(640, self.args["way"]),
         )
 
     def inner_loop(self, proto, support):
@@ -155,15 +155,15 @@ class INSTA_ProtoNet(MetaModel):
         optimizer = torch.optim.SGD([SFC], lr=0.6, momentum=0.9, dampening=0.9, weight_decay=0)
 
         # Create labels for the support set, used in cross-entropy loss during fine-tuning.
-        label_shot = torch.arange(self.args.way).repeat(self.args.shot)
+        label_shot = torch.arange(self.args["way"]).repeat(self.args["shot"])
         label_shot = label_shot.type(torch.cuda.LongTensor)
 
         # Perform gradient steps to update the prototypes.
         with torch.enable_grad():
             for k in range(50):  # Number of gradient steps.
-                rand_id = torch.randperm(self.args.way * self.args.shot).cuda()
-                for j in range(0, self.args.way * self.args.shot, 4):
-                    selected_id = rand_id[j: min(j + 4, self.args.way * self.args.shot)]
+                rand_id = torch.randperm(self.args["way"] * self.args["shot"]).cuda()
+                for j in range(0, self.args["way"] * self.args["shot"], 4):
+                    selected_id = rand_id[j: min(j + 4, self.args["way"] * self.args["shot"])]
                     batch_shot = support[selected_id, :]
                     batch_label = label_shot[selected_id]
                     optimizer.zero_grad()
@@ -187,7 +187,7 @@ class INSTA_ProtoNet(MetaModel):
         Returns:
         - logits: Logits representing similarity scores between each query and each prototype.
         """
-        logits = -torch.sum((proto.unsqueeze(0) - query.unsqueeze(1)) ** 2, 2) / self.args.temperature
+        logits = -torch.sum((proto.unsqueeze(0) - query.unsqueeze(1)) ** 2, 2) / self.args["temperature"]
         return logits.squeeze()
 
     def _forward(self, instance_embs, support_idx, query_idx):
@@ -225,7 +225,7 @@ class INSTA_ProtoNet(MetaModel):
         adapted_q = nn.AdaptiveAvgPool2d(1)(query).squeeze(-1).squeeze(-1)
 
         # 4. 微调原型（仅在测试阶段）
-        if self.args.testing:
+        if self.args["testing"]:
             adapted_proto = self.inner_loop(
                 adapted_proto,
                 nn.AdaptiveAvgPool2d(1)(support).squeeze().view(num_proto * num_samples, channel_dim)
@@ -286,7 +286,7 @@ class INSTA_ProtoNet(MetaModel):
             # 假设有辅助标签 `label_aux`，这里需要根据具体情况调整
             # 例如，假设 label_aux 是另一组标签，可以通过 `batch` 获取
             label_aux = global_target  # 示例，实际应根据数据结构获取
-            total_loss = self.args.balance_1 * loss + self.args.balance_2 * self.loss_func(reg_logits, label_aux)
+            total_loss = self.args["balance_1"] * loss + self.args["balance_2"] * self.loss_func(reg_logits, label_aux)
         else:
             loss = self.loss_func(logits, query_target)
             total_loss = loss
