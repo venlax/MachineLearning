@@ -1,0 +1,13 @@
+includes:
+  - headers/data.yaml
+  - headers/device.yaml
+  - headers/misc.yaml
+  - headers/model.yaml
+  - headers/optimizer.yaml
+  - backbones/Conv4.yaml
+
+classifier:
+  name: INSTA_ProtoNet
+  kwargs:
+    n_way: 5
+    n_support: 1
