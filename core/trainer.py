@@ -169,7 +169,6 @@ class Trainer(object):
             output, acc, loss = self.model(
                 [elem for each_batch in batch for elem in each_batch]
             )
-
             # compute gradients
             self.optimizer.zero_grad()
             loss.backward()

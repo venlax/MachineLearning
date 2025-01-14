@@ -14,7 +14,9 @@ classifier:
     args:
       way: 5
       shot: 1
+      query: 15
       balance_1 : 0.5
       balance_2 : 0.5
       temperature : 1
+      training : True
       testing : False

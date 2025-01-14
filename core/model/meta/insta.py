@@ -4,14 +4,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import time
-
+import numpy as np
 from .meta_model import MetaModel
 from core.utils import accuracy
 
 from ..backbone.fcanet import MultiSpectralAttentionLayer
 
 from ..backbone.resnet_12 import resnet12
-
+def count_acc(logits, label):
+    pred = torch.argmax(logits, dim=1)
+    if torch.cuda.is_available():
+        return (pred == label).type(torch.cuda.FloatTensor).mean().item()
+    else:
+        return (pred == label).type(torch.FloatTensor).mean().item()
 class INSTA(nn.Module):
     def __init__(self, c, spatial_size, sigma, k, args, **kwargs):
         super().__init__()
@@ -27,7 +32,7 @@ class INSTA(nn.Module):
         self.Unfold = nn.Unfold(kernel_size=k, padding=int((self.k + 1) / 2 - 1))
         self.spatial_size = spatial_size
 
-        c2wh = {512: 11, 640: self.spatial_size}
+        c2wh = {512: 11, 160: self.spatial_size}
 
         self.channel_att = MultiSpectralAttentionLayer(
             c, c2wh[c], c2wh[c], sigma=self.h1, k=self.k, freq_sel_method='low16'
@@ -62,8 +67,10 @@ class INSTA(nn.Module):
     def spatial_kernel_network(self, feature_map, conv):
         spatial_kernel = conv(feature_map)
         spatial_kernel = spatial_kernel.flatten(-2).transpose(-1, -2)
+        print(spatial_kernel.shape)
         size = spatial_kernel.size()
         spatial_kernel = spatial_kernel.view(size[0], -1, self.k, self.k)
+        print(spatial_kernel.shape)
         spatial_kernel = self.fn_partial(spatial_kernel)
 
         spatial_kernel = spatial_kernel.flatten(-2)
@@ -78,13 +85,13 @@ class INSTA(nn.Module):
 
     def unfold(self, x, padding, k):
         # Custom unfold operation
-        x_padded = torch.cuda.FloatTensor(
+        x_padded = torch.cuda.HalfTensor(
             x.shape[0], x.shape[1],
             x.shape[2] + 2 * padding,
             x.shape[3] + 2 * padding
         ).fill_(0)
         x_padded[:, :, padding:-padding, padding:-padding] = x
-        x_unfolded = torch.cuda.FloatTensor(*x.shape, k, k).fill_(0)
+        x_unfolded = torch.cuda.HalfTensor(*x.shape, k, k).fill_(0)
         for i in range(int((self.k + 1) / 2 - 1), x.shape[2] + int((self.k + 1) / 2 - 1)):
             for j in range(int((self.k + 1) / 2 - 1), x.shape[3] + int((self.k + 1) / 2 - 1)):
                 x_unfolded[:, :, i - int(((self.k + 1) / 2 - 1)),
@@ -122,8 +129,10 @@ class INSTA(nn.Module):
         )
 
         kernel = task_kernel * instance_kernel
+        print(x.shape)
         unfold_feature = self.unfold(x, int((self.k + 1) / 2 - 1), self.k)  # Perform a custom unfold operation
         adapted_feature = (unfold_feature * kernel).mean(dim=(-1, -2)).squeeze(-1).squeeze(-1)
+        torch.cuda.empty_cache()
         return adapted_feature + x, task_kernel  # Return the normal training output and task-specific kernel
 
 
@@ -132,10 +141,11 @@ class INSTA_ProtoNet(MetaModel):
         super().__init__(init_type, **kwargs)
         self.args = args
         self.feature = resnet12()
+        self.feature_extractor = nn.Conv2d(3, 160, kernel_size=1)
         self.loss_func = nn.CrossEntropyLoss()
-        self.INSTA = INSTA(640, 5, 0.2, 3, args=args)
+        self.INSTA = INSTA(160, 84, 0.2, 3, args=args)
         self.classifier = nn.Sequential(
-            nn.Linear(640, self.args["way"]),
+            nn.Linear(160, self.args["way"]),
         )
 
     def inner_loop(self, proto, support):
@@ -205,7 +215,7 @@ class INSTA_ProtoNet(MetaModel):
         # 1. 支持集和查询集特征提取与适应
         emb_dim = instance_embs.size()[-3:]
         channel_dim = emb_dim[0]
-
+        
         support = instance_embs[support_idx.flatten()].view(*(support_idx.shape + emb_dim))
         query = instance_embs[query_idx.flatten()].view(*(query_idx.shape + emb_dim))
         num_samples = support.shape[1]
@@ -273,27 +283,42 @@ class INSTA_ProtoNet(MetaModel):
         - acc: 准确率。
         - loss: 计算得到的损失。
         """
-        start_tm = time.time()
-        image, global_target = batch
-        image = image.to(self.device)
-        feat = self.emb_func(image)
-        support_feat, query_feat, support_target, query_target = self.split_by_episode(feat, mode=1)
+        
+        args = self.args
 
+        # prepare one-hot label
+        label = torch.arange(args["way"], dtype=torch.int16).repeat(args["query"])
+        label_aux = torch.arange(args["way"], dtype=torch.int8).repeat(args["shot"] + args["query"])
+        
+        label = label.type(torch.LongTensor)
+        label_aux = label_aux.type(torch.LongTensor)
+        
+        if torch.cuda.is_available():
+            label = label.cuda()
+            label_aux = label_aux.cuda()
+        image, global_target = batch
+        image = image.squeeze(0)
+        image = image.to(self.device)
+        # image = self.feature(image)
+        image = self.feature_extractor(image)
+        support_idx = torch.Tensor(np.arange(args["way"]*args["shot"])).long().view(1, args["shot"], args["way"])
+        query_idx = torch.Tensor(np.arange(args["way"]*args["shot"], args["way"] * (args["shot"] + args["query"]))).long().view(1, args["query"], args["way"])
         # 调用 _forward 获取 logits 和可能的 reg_logits
-        logits, reg_logits = self._forward(feat, support_feat, query_feat)
+        print(image.shape, support_idx.shape, query_idx.shape)
+        logits, reg_logits = self._forward(image, support_idx, query_idx)
 
         # 计算损失
         if reg_logits is not None:
-            loss = self.loss_func(logits, query_target)
+            loss = F.cross_entropy(logits, label)
             # 假设有辅助标签 `label_aux`，这里需要根据具体情况调整
             # 例如，假设 label_aux 是另一组标签，可以通过 `batch` 获取
             label_aux = global_target  # 示例，实际应根据数据结构获取
-            total_loss = self.args["balance_1"] * loss + self.args["balance_2"] * self.loss_func(reg_logits, label_aux)
+            total_loss = self.args["balance_1"] * loss + self.args["balance_2"] * F.cross_entropy(reg_logits, label_aux)
         else:
-            loss = self.loss_func(logits, query_target)
+            loss = F.cross_entropy(logits, label)
             total_loss = loss
 
         # 计算准确率
-        acc = accuracy(logits, query_target)
-
+        acc = count_acc(logits, label)
+        torch.cuda.empty_cache()
         return logits, acc, total_loss
