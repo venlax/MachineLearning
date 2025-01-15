@@ -10,6 +10,8 @@ from core.utils import accuracy
 
 from ..backbone.fcanet import MultiSpectralAttentionLayer
 
+from ..backbone.res10 import ResNet10
+from ..backbone.conv_4 import Conv4
 from ..backbone.resnet_12 import resnet12
 def count_acc(logits, label):
     pred = torch.argmax(logits, dim=1)
@@ -140,7 +142,7 @@ class INSTA_ProtoNet(MetaModel):
     def __init__(self, args, init_type="normal", **kwargs):
         super().__init__(init_type, **kwargs)
         self.args = args
-        self.feature = resnet12()
+        self.feature = Conv4()
         self.feature_extractor = nn.Conv2d(3, 160, kernel_size=1)
         self.loss_func = nn.CrossEntropyLoss()
         self.INSTA = INSTA(160, 84, 0.2, 3, args=args)
