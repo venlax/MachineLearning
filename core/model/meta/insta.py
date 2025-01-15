@@ -22,7 +22,6 @@ def count_acc(logits, label):
 class INSTA(nn.Module):
     def __init__(self, c, spatial_size, sigma, k, args, **kwargs):
         super().__init__()
-        # TODO
         self.channel = c
         self.h1 = sigma
         self.h2 = k ** 2
@@ -142,7 +141,7 @@ class INSTA_ProtoNet(MetaModel):
     def __init__(self, args, init_type="normal", **kwargs):
         super().__init__(init_type, **kwargs)
         self.args = args
-        self.feature = Conv4()
+        self.feature = ResNet10()
         self.feature_extractor = nn.Conv2d(3, 160, kernel_size=1)
         self.loss_func = nn.CrossEntropyLoss()
         self.INSTA = INSTA(160, 84, 0.2, 3, args=args)
@@ -205,19 +204,9 @@ class INSTA_ProtoNet(MetaModel):
         return logits.squeeze()
 
     def _forward(self, instance_embs, support_idx, query_idx):
-        """
-        前向传播方法，处理支持集和查询集的特征，计算分类结果。
-
-        功能分区：
-        1. 支持集和查询集特征提取与适应
-        2. 生成适应后的原型
-        3. 查询集特征的适应与分类
-        4. 返回分类输出和任务特定内核
-        """
-        # 1. 支持集和查询集特征提取与适应
-        emb_dim = instance_embs.size()[-3:]
+        emb_dim = instance_embs.size()[-1:]
         channel_dim = emb_dim[0]
-        
+
         support = instance_embs[support_idx.flatten()].view(*(support_idx.shape + emb_dim))
         query = instance_embs[query_idx.flatten()].view(*(query_idx.shape + emb_dim))
         num_samples = support.shape[1]
@@ -227,26 +216,22 @@ class INSTA_ProtoNet(MetaModel):
         adapted_s, task_kernel = self.INSTA(support.view(-1, *emb_dim))
         query = query.view(-1, *emb_dim)
 
-        # 2. 生成适应后的原型
         adapted_proto = adapted_s.view(num_samples, -1, *adapted_s.shape[1:]).mean(0)
         adapted_proto = nn.AdaptiveAvgPool2d(1)(adapted_proto).squeeze(-1).squeeze(-1)
 
-        # 3. 查询集特征的适应与分类
         query_ = nn.AdaptiveAvgPool2d(1)(
             (self.INSTA.unfold(query, int((task_kernel.shape[-1] + 1) / 2 - 1), task_kernel.shape[-1]) * task_kernel)
         ).squeeze()
         query = query + query_
         adapted_q = nn.AdaptiveAvgPool2d(1)(query).squeeze(-1).squeeze(-1)
 
-        # 4. 微调原型（仅在测试阶段）
         if self.args["testing"]:
             adapted_proto = self.inner_loop(
                 adapted_proto,
                 nn.AdaptiveAvgPool2d(1)(support).squeeze().view(num_proto * num_samples, channel_dim)
             )
 
-        # 5. 分类
-        logits = self.classifier(adapted_q, adapted_proto)
+        logits = self.compute_logits(adapted_q, adapted_proto)
 
         if self.training:
             reg_logits = None
@@ -255,16 +240,6 @@ class INSTA_ProtoNet(MetaModel):
             return logits
 
     def set_forward(self, batch):
-        """
-        推理阶段调用，返回分类输出以及准确率。
-
-        参数：
-        - batch: 输入数据批次，包含图像和标签。
-
-        返回：
-        - output: 分类输出。
-        - acc: 准确率。
-        """
         image, global_target = batch
         image = image.to(self.device)
         feat = self.emb_func(image)
@@ -274,21 +249,9 @@ class INSTA_ProtoNet(MetaModel):
         return output, acc
 
     def set_forward_loss(self, batch):
-        """
-        训练阶段调用，返回分类输出、准确率以及前向损失。
-
-        参数：
-        - batch: 输入数据批次，包含图像和标签。
-
-        返回：
-        - output: 分类输出。
-        - acc: 准确率。
-        - loss: 计算得到的损失。
-        """
         
         args = self.args
 
-        # prepare one-hot label
         label = torch.arange(args["way"], dtype=torch.int16).repeat(args["query"])
         label_aux = torch.arange(args["way"], dtype=torch.int8).repeat(args["shot"] + args["query"])
         
@@ -312,9 +275,7 @@ class INSTA_ProtoNet(MetaModel):
         # 计算损失
         if reg_logits is not None:
             loss = F.cross_entropy(logits, label)
-            # 假设有辅助标签 `label_aux`，这里需要根据具体情况调整
-            # 例如，假设 label_aux 是另一组标签，可以通过 `batch` 获取
-            label_aux = global_target  # 示例，实际应根据数据结构获取
+            label_aux = global_target
             total_loss = self.args["balance_1"] * loss + self.args["balance_2"] * F.cross_entropy(reg_logits, label_aux)
         else:
             loss = F.cross_entropy(logits, label)
